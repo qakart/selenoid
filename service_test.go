@@ -108,7 +108,19 @@ func testMux() http.Handler {
 						"HostPort": "%s"
 						}
 					],
+					"7070/tcp": [
+						{
+						"HostIp": "0.0.0.0",
+						"HostPort": "%s"
+						}
+					],
 					"8080/tcp": [
+						{
+						"HostIp": "0.0.0.0",
+						"HostPort": "%s"
+						}
+					],
+					"9090/tcp": [
 						{
 						"HostIp": "0.0.0.0",
 						"HostPort": "%s"
@@ -147,8 +159,13 @@ func testMux() http.Handler {
 			  "State": {},
 			  "Mounts": []
 			}
-			`, p, p, p, p)
+			`, p, p, p, p, p, p)
 			w.Write([]byte(output))
+		},
+	))
+	mux.HandleFunc("/v1.29/networks/net-1/connect", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
 		},
 	))
 	return mux
@@ -186,6 +203,8 @@ func testConfig(env *service.Environment) *config.Config {
 				Volumes: []string{"/test:/test"},
 				Labels:  map[string]string{"key": "value"},
 				Sysctl:  map[string]string{"sysctl net.ipv4.tcp_timestamps": "2"},
+				Mem:     "512m",
+				Cpu:     "1.0",
 			},
 		},
 	}
@@ -248,7 +267,7 @@ func testDocker(t *testing.T, env *service.Environment, cfg *config.Config) {
 	AssertThat(t, startedService.Url, Not{nil})
 	AssertThat(t, startedService.Container, Not{nil})
 	AssertThat(t, startedService.Container.ID, EqualTo{"e90e34656806"})
-	AssertThat(t, startedService.VNCHostPort, EqualTo{"127.0.0.1:5900"})
+	AssertThat(t, startedService.HostPort.VNC, EqualTo{"127.0.0.1:5900"})
 	AssertThat(t, startedService.Cancel, Not{nil})
 	startedService.Cancel()
 }
@@ -261,16 +280,20 @@ func createDockerStarter(t *testing.T, env *service.Environment, cfg *config.Con
 		DeviceName:            "firefox",
 		Version:               "33.0",
 		ScreenResolution:      "1024x768",
+		Skin:                  "WXGA800",
 		VNC:                   true,
 		Video:                 true,
 		VideoScreenSize:       "1024x768",
 		VideoFrameRate:        25,
+		VideoCodec:            "libx264",
+		Log:                   true,
 		LogName:               "testfile",
 		Env:                   []string{"LANG=ru_RU.UTF-8", "LANGUAGE=ru:en"},
 		HostsEntries:          []string{"example.com:192.168.0.1", "test.com:192.168.0.2"},
 		DNSServers:            []string{"192.168.0.1", "192.168.0.2"},
 		Labels:                map[string]string{"label1": "some-value", "label2": ""},
 		ApplicationContainers: []string{"one", "two"},
+		AdditionalNetworks:    []string{"net-1"},
 		TimeZone:              "Europe/Moscow",
 		ContainerHostname:     "some-hostname",
 		TestName:              "my-cool-test",
@@ -335,7 +358,9 @@ func TestGetVNC(t *testing.T) {
 
 	testTcpServer := testTCPServer("test-data")
 	sessions.Put("test-session", &session.Session{
-		VNC: testTcpServer.Addr().String(),
+		HostPort: session.HostPort{
+			VNC: testTcpServer.Addr().String(),
+		},
 	})
 	defer sessions.Remove("test-session")
 

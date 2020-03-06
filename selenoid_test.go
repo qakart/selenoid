@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/mafredri/cdp"
+	"github.com/mafredri/cdp/rpcc"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 
 	. "github.com/aandryashin/matchers"
 	. "github.com/aandryashin/matchers/httpresp"
+	ggr "github.com/aerokube/ggr/config"
 )
 
 var (
@@ -30,7 +33,12 @@ func init() {
 	enableFileUpload = true
 	videoOutputDir, _ = ioutil.TempDir("", "selenoid-test")
 	logOutputDir, _ = ioutil.TempDir("", "selenoid-test")
+	saveAllLogs = true
 	gitRevision = "test-revision"
+	ggrHost = &ggr.Host{
+		Name: "some-host.example.com",
+		Port: 4444,
+	}
 	srv = httptest.NewServer(handler())
 }
 
@@ -90,18 +98,18 @@ func TestGetShortScreenResolution(t *testing.T) {
 	AssertThat(t, res, EqualTo{"1024x768x24"})
 }
 
+func TestTooBigSessionTimeoutCapability(t *testing.T) {
+	testBadSessionTimeoutCapability(t, "1h1m")
+}
+
 func TestInvalidSessionTimeoutCapability(t *testing.T) {
-	testBadSessionTimeoutCapability(t, 3601)
+	testBadSessionTimeoutCapability(t, "wrong-value")
 }
 
-func TestNegativeSessionTimeoutCapability(t *testing.T) {
-	testBadSessionTimeoutCapability(t, -1)
-}
-
-func testBadSessionTimeoutCapability(t *testing.T, timeoutValue int) {
+func testBadSessionTimeoutCapability(t *testing.T, timeoutValue string) {
 	manager = &BrowserNotFound{}
 
-	rsp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte(fmt.Sprintf(`{"desiredCapabilities":{"sessionTimeout":%d}}`, timeoutValue))))
+	rsp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte(fmt.Sprintf(`{"desiredCapabilities":{"sessionTimeout":"%s"}}`, timeoutValue))))
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, rsp, Code{http.StatusBadRequest})
 
@@ -195,7 +203,7 @@ func TestSessionCreated(t *testing.T) {
 	manager = &HTTPTest{Handler: Selenium()}
 	timeout = 5 * time.Second
 
-	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte(`{"desiredCapabilities": {"enableVideo": true, "enableVNC": true, "sessionTimeout": 3}}`)))
+	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte(`{"desiredCapabilities": {"enableVideo": true, "enableVNC": true, "sessionTimeout": "3s"}}`)))
 	AssertThat(t, err, Is{nil})
 	var sess map[string]string
 	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
@@ -213,7 +221,7 @@ func TestSessionCreated(t *testing.T) {
 func TestSessionCreatedW3C(t *testing.T) {
 	manager = &HTTPTest{Handler: Selenium()}
 
-	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte(`{"capabilities":{"alwaysMatch":{"acceptInsecureCerts":true,"browserName":"firefox"}}}`)))
+	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte(`{"capabilities":{"alwaysMatch":{"acceptInsecureCerts":true, "browserName":"firefox", "browserVersion":"latest", "selenoid:options":{"enableVNC": true}}}}`)))
 	AssertThat(t, err, Is{nil})
 	var sess map[string]string
 	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
@@ -224,6 +232,46 @@ func TestSessionCreatedW3C(t *testing.T) {
 	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&state}})
 	AssertThat(t, state.Used, EqualTo{1})
 	AssertThat(t, queue.Used(), EqualTo{1})
+
+	versions, firefoxPresent := state.Browsers["firefox"]
+	AssertThat(t, firefoxPresent, Is{true})
+	users, versionPresent := versions["latest"]
+	AssertThat(t, versionPresent, Is{true})
+	userInfo, userPresent := users["unknown"]
+	AssertThat(t, userPresent, Is{true})
+	AssertThat(t, userInfo, Not{nil})
+	AssertThat(t, len(userInfo.Sessions), EqualTo{1})
+	AssertThat(t, userInfo.Sessions[0].VNC, EqualTo{true})
+
+	sessions.Remove(sess["sessionId"])
+	queue.Release()
+}
+
+func TestSessionCreatedFirstMatchOnly(t *testing.T) {
+	manager = &HTTPTest{Handler: Selenium()}
+
+	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte(`{"capabilities":{"firstMatch":[{"browserName":"firefox", "browserVersion":"latest", "selenoid:options":{"enableVNC": true}}]}}`)))
+	AssertThat(t, err, Is{nil})
+	var sess map[string]string
+	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
+
+	resp, err = http.Get(With(srv.URL).Path("/status"))
+	AssertThat(t, err, Is{nil})
+	var state config.State
+	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&state}})
+	AssertThat(t, state.Used, EqualTo{1})
+	AssertThat(t, queue.Used(), EqualTo{1})
+
+	versions, firefoxPresent := state.Browsers["firefox"]
+	AssertThat(t, firefoxPresent, Is{true})
+	users, versionPresent := versions["latest"]
+	AssertThat(t, versionPresent, Is{true})
+	userInfo, userPresent := users["unknown"]
+	AssertThat(t, userPresent, Is{true})
+	AssertThat(t, userInfo, Not{nil})
+	AssertThat(t, len(userInfo.Sessions), EqualTo{1})
+	AssertThat(t, userInfo.Sessions[0].VNC, EqualTo{true})
+
 	sessions.Remove(sess["sessionId"])
 	queue.Release()
 }
@@ -350,6 +398,23 @@ func TestProxySession(t *testing.T) {
 	AssertThat(t, resp, Code{http.StatusOK})
 
 	AssertThat(t, queue.Used(), EqualTo{1})
+	sessions.Remove(sess["sessionId"])
+	queue.Release()
+}
+
+func TestProxySessionPanicOnAbortHandler(t *testing.T) {
+
+	manager = &HTTPTest{Handler: Selenium()}
+
+	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte("{}")))
+	AssertThat(t, err, Is{nil})
+	var sess map[string]string
+	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
+
+	req, _ := http.NewRequest(http.MethodGet, With(srv.URL).Path(fmt.Sprintf("/wd/hub/session/%s/url?abort-handler=true", sess["sessionId"])), nil)
+	resp, err = http.DefaultClient.Do(req)
+	AssertThat(t, err, Not{nil})
+
 	sessions.Remove(sess["sessionId"])
 	queue.Release()
 }
@@ -639,6 +704,13 @@ func TestServeAndDeleteVideoFile(t *testing.T) {
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, rsp, Code{http.StatusOK})
 
+	rsp, err = http.Get(With(srv.URL).Path("/video/?json"))
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, rsp, Code{http.StatusOK})
+	var files []string
+	AssertThat(t, rsp, IsJson{&files})
+	AssertThat(t, files, EqualTo{[]string{"testfile"}})
+
 	deleteReq, _ := http.NewRequest(http.MethodDelete, With(srv.URL).Path("/video/testfile"), nil)
 	rsp, err = http.DefaultClient.Do(deleteReq)
 	AssertThat(t, err, Is{nil})
@@ -658,6 +730,13 @@ func TestServeAndDeleteLogFile(t *testing.T) {
 	rsp, err := http.Get(With(srv.URL).Path("/logs/logfile.log"))
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, rsp, Code{http.StatusOK})
+
+	rsp, err = http.Get(With(srv.URL).Path("/logs/?json"))
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, rsp, Code{http.StatusOK})
+	var files []string
+	AssertThat(t, rsp, IsJson{&files})
+	AssertThat(t, len(files) > 0, Is{true})
 
 	deleteReq, _ := http.NewRequest(http.MethodDelete, With(srv.URL).Path("/logs/logfile.log"), nil)
 	rsp, err = http.DefaultClient.Do(deleteReq)
@@ -693,4 +772,76 @@ func TestFileDownloadMissingSession(t *testing.T) {
 	rsp, err := http.Get(With(srv.URL).Path("/download/missing-session/testfile"))
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, rsp, Code{http.StatusNotFound})
+}
+
+func TestClipboard(t *testing.T) {
+	manager = &HTTPTest{Handler: Selenium()}
+
+	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte("{}")))
+	AssertThat(t, err, Is{nil})
+
+	var sess map[string]string
+	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
+
+	rsp, err := http.Get(With(srv.URL).Path(fmt.Sprintf("/clipboard/%s", sess["sessionId"])))
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, rsp, Code{http.StatusOK})
+	data, err := ioutil.ReadAll(rsp.Body)
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, string(data), EqualTo{"test-clipboard-value"})
+
+	rsp, err = http.Post(With(srv.URL).Path(fmt.Sprintf("/clipboard/%s", sess["sessionId"])), "text/plain", bytes.NewReader([]byte("any-data")))
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, rsp, Code{http.StatusOK})
+
+	sessions.Remove(sess["sessionId"])
+	queue.Release()
+}
+
+func TestClipboardMissingSession(t *testing.T) {
+	rsp, err := http.Get(With(srv.URL).Path("/clipboard/missing-session"))
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, rsp, Code{http.StatusNotFound})
+}
+
+func TestDevtools(t *testing.T) {
+	manager = &HTTPTest{Handler: Selenium()}
+
+	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte("{}")))
+	AssertThat(t, err, Is{nil})
+
+	var sess map[string]string
+	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
+
+	u := fmt.Sprintf("ws://%s/devtools/%s", srv.Listener.Addr().String(), sess["sessionId"])
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	conn, err := rpcc.DialContext(ctx, u)
+	AssertThat(t, err, Is{nil})
+	defer conn.Close()
+
+	c := cdp.NewClient(conn)
+	err = c.Page.Enable(ctx)
+	AssertThat(t, err, Is{nil})
+
+	sessions.Remove(sess["sessionId"])
+	queue.Release()
+}
+
+func TestParseGgrHost(t *testing.T) {
+	h := parseGgrHost("some-host.example.com:4444")
+	AssertThat(t, h.Name, EqualTo{"some-host.example.com"})
+	AssertThat(t, h.Port, EqualTo{4444})
+}
+
+func TestWelcomeScreen(t *testing.T) {
+	rsp, err := http.Get(With(srv.URL).Path("/"))
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, rsp, Code{http.StatusOK})
+
+	rsp, err = http.Get(With(srv.URL).Path("/wd/hub"))
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, rsp, Code{http.StatusOK})
 }

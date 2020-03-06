@@ -54,7 +54,7 @@ func (d *Driver) StartWithCancel() (*StartedService, error) {
 	if d.CaptureDriverLogs {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-	} else if d.LogOutputDir != "" {
+	} else if d.LogOutputDir != "" && (d.SaveAllLogs || d.Log) {
 		filename := filepath.Join(d.LogOutputDir, d.LogName)
 		f, err := os.Create(filename)
 		if err != nil {
@@ -77,7 +77,11 @@ func (d *Driver) StartWithCancel() (*StartedService, error) {
 	}
 	log.Printf("[%d] [PROCESS_STARTED] [%d] [%.2fs]", requestId, cmd.Process.Pid, util.SecondsSince(s))
 	log.Printf("[%d] [PROXY_TO] [%s]", requestId, u.String())
-	return &StartedService{Url: u, Cancel: func() { d.stopProcess(cmd) }}, nil
+        hp := session.HostPort{}
+        if d.Caps.VNC {
+                hp.VNC = "127.0.0.1:5900"
+        }
+        return &StartedService{Url: u, HostPort: hp, Cancel: func() { d.stopProcess(cmd) }}, nil
 }
 
 func (d *Driver) stopProcess(cmd *exec.Cmd) {
@@ -88,8 +92,8 @@ func (d *Driver) stopProcess(cmd *exec.Cmd) {
 		log.Printf("[%d] [FAILED_TO_TERMINATE_PROCESS] [%d] [%v]", d.RequestId, cmd.Process.Pid, err)
 		return
 	}
-	if !d.CaptureDriverLogs && d.LogOutputDir != "" {
-		cmd.Stdout.(*os.File).Close()
+	if stdout, ok := cmd.Stdout.(*os.File); ok && !d.CaptureDriverLogs && d.LogOutputDir != "" {
+		stdout.Close()
 	}
 	log.Printf("[%d] [TERMINATED_PROCESS] [%d] [%.2fs]", d.RequestId, cmd.Process.Pid, util.SecondsSince(s))
 }
